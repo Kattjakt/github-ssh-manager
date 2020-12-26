@@ -1,0 +1,526 @@
+#!/bin/bash
+# Description: Lightweight utility for managing SSH keys for multiple GitHub repositories
+# Author: Leo Sandström <leo@sandstrom.party>
+
+SSH_ROOT_DIR="~/.ssh"
+SSH_CI_DIR="$SSH_ROOT_DIR/github"
+SSH_KEY_FILENAME="id_ed25519"
+SSH_CONFIG_PATH="$SSH_ROOT_DIR/config"
+SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
+
+set -Eeo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+}
+
+setup_colors() {
+  if [[ -t 2 ]] && [[ -z "${NO_COLOR-}" ]] && [[ "${TERM-}" != "dumb" ]]; then
+    NOFORMAT='\033[0m' DIM='\033[2m' UNDERLINE='\033[4m' BOLD='\033[1m' LIGHTGRAY='\033[0;37m' DARKGRAY='\033[0;90m' RED='\033[0;31m' LIGHTRED='\033[0;91m' GREEN='\033[0;32m' ORANGE='\033[0;33m' BLUE='\033[0;34m' PURPLE='\033[0;35m' PINK='\033[0;95m' CYAN='\033[0;36m' LIGHTYELLOW='\033[1;93m' YELLOW='\033[1;33m'
+  else
+    NOFORMAT='' DIM='' UNDERLINE='' BOLD='' LIGHTGRAY='' DARKGRAY='' RED='' LIGHTRED='' GREEN='' ORANGE='' BLUE='' PURPLE='' PINK='' CYAN='' LIGHTYELLOW='' YELLOW=''
+  fi
+}
+
+print_cmd() {
+	printf "${PINK}${BOLD}%s${NOFORMAT}" "$@"
+}
+
+print_param() {
+	printf "${PURPLE}%s${NOFORMAT}" "$@"
+}
+
+print_path() {
+	printf "${UNDERLINE}%s${NOFORMAT}" "$@"
+}
+
+print_link() {
+	printf "${CYAN}${UNDERLINE}%s${NOFORMAT}" "$@"
+}
+
+fatal() {
+	echo -e "${RED}$@${NOFORMAT}" 1>&2
+	kill $$
+}
+
+warn() {
+	echo -e "${ORANGE}⚠ $@${NOFORMAT}"
+}
+
+success() {
+	echo -e "${GREEN}✓ $@${NOFORMAT}"
+}
+
+get_project_path() {
+	local project_name="$1"
+	local path="$SSH_CI_DIR/$project_name"
+
+	echo "$path"
+}
+
+does_project_exist() {
+	local project_name="$1"
+	local project_path=$(get_project_path "$project_name")
+
+	if [[ -d $project_path ]]; then
+		return 0
+	fi
+
+	return 1
+}
+
+get_project_username() {
+	local project_name="$1"
+
+	# Split the input based on the delimiter
+	IFS='/'
+	read -a list <<< "$project_name"
+	local count="${#list[*]}"
+
+	# If the input matches our format
+	if [ $count -eq 2 ]; then
+		echo "${list[0]}"
+	else
+		exit 1
+	fi
+}
+
+get_project_repository() {
+	local project_name="$1"
+
+	# Split the input based on the delimiter
+	IFS='/'
+	read -a list <<< "$project_name"
+	local count="${#list[*]}"
+
+	# If the input matches our format
+	if [ $count -eq 2 ]; then
+		echo "${list[1]}"
+	else
+		exit 1
+	fi
+}
+
+
+get_project_public_key_path() {
+	local project_name="$1"
+	local project_path=$(get_project_path "$project_name")
+
+	if [[ ! -d $project_path ]]; then
+		exit 1
+	fi
+
+	local public_key_path=$(find $project_path -name "*.pub")
+
+	if [ ! -f "$public_key_path" ]; then
+		exit 1
+	fi
+
+	echo "$public_key_path"
+}
+
+get_project_private_key_path() {
+	local project_name="$1"
+	local public_key_path=$(get_project_public_key_path "$project_name")
+	local private_key_path=${public_key_path%".pub"}
+
+	if [ ! -f "$private_key_path" ]; then
+		exit 1
+	fi
+
+	echo $private_key_path
+}
+
+get_project_public_key() {
+	local project_name="$1"
+	local path="$(get_project_public_key_path "$project_name")"
+
+	echo $(<"$path")
+}
+
+get_project_private_key() {
+	local project_name="$1"
+	local path="$(get_project_private_key_path "$project_name")"
+
+	echo $(<"$path")
+}
+
+get_project_ssh_hostname() {
+	local project_name="$1"
+	local username=$(get_project_username "$project_name")
+	local repository=$(get_project_repository "$project_name")
+
+	if [[ -z $username || -z $repository ]]; then
+		exit 1
+	fi
+
+	echo "${username}_${repository}"
+}
+
+get_projects() {
+	local username_folders=$(find "$SSH_CI_DIR" -mindepth 1 -maxdepth 1 -type d)
+
+	for username_folder in ${username_folders[@]}; do
+		local project_folders=$(find "$username_folder" -mindepth 1 -maxdepth 1 -type d)
+		local username=$(basename $username_folder)
+
+		for repository_folder in ${project_folders[@]}; do
+			local repository=$(basename $repository_folder)
+			local project="$username/$repository"
+
+			echo $project
+		done
+	done
+}
+
+list_projects() {
+	# Find all existing projects
+	local projects="$(get_projects)"
+
+	# Create the table header
+	local rows="$(printf "${BOLD}%s|%s|%s|%s|%s|%s${NOFORMAT}\n" "REPOSITORY" "ACTIVE" "PRIVATE KEY" "PUBLIC KEY" "LAST UPDATED")\n"
+
+	for project_name in $projects; do
+		local repository="$(get_project_repository "$project_name")"
+		local public_key_path="$(get_project_public_key_path "$project_name")"
+		local private_key_path="$(get_project_private_key_path "$project_name")"
+
+		# Skip if we couldn't find a public key
+		if [ -z "$public_key_path" ]; then continue; fi
+
+		local SSH_public_key_filename=$(basename "$public_key_path")
+		local private_key_filename=$(basename "$public_key_filename" .pub)
+
+		# skip if we couldn't find a private key
+		if [ -z "$private_key_filename" ]; then continue; fi
+
+		# Check if the key exists in .ssh/config
+		local active="${RED}No${NOFORMAT}"
+		if grep -Fq "IdentityFile=${private_key_path}" $SSH_CONFIG_PATH; then active="${GREEN}Yes${NOFORMAT}"; fi
+
+		# Check when the keys was last updated
+		local last_changed=$(stat $public_key_path -c '%Z')
+
+		# Make the date human readable
+		local date=$(date -d "@$last_changed" +"%a %b %d %T %Y")
+
+		# Append row to our table
+		rows="${rows}$(printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
+			"$CYAN${project_name}$NOFORMAT" \
+			"$active" \
+			"$DIM$private_key_filename$NOFORMAT" \
+			"$DIM$public_key_filename$NOFORMAT" \
+			"$date")\n"
+	done
+
+	echo -e $rows | column -t -s '|'
+}
+
+print_usage() {
+	local script_name="${DARKGRAY}$DIM\$${NOFORMAT} ${DARKGRAY}${SCRIPT_NAME}${NOFORMAT}"
+
+	echo -e ""
+	echo -e " Lightweight utility for managing SSH keys for multiple GitHub repositories"
+	echo -e " on a single machine. It's essentially a simplified version of the workflow"
+	echo -e " described here: $(print_link "https://docs.github.com/developers/overview/managing-deploy-keys")"
+	echo -e ""
+	echo -e "${BOLD}Usage:${NOFORMAT}"
+	echo -e "  $script_name $(print_cmd init) $(print_param "<source>")"
+	echo -e "    Generate a new folder with a pair of labeled SSH keys under $(print_path $SSH_CI_DIR/)"
+	echo -e "    The parameter $(print_param "source") must match one of the following formats:"
+	echo -e "    $LIGHTGRAY - user/repo"
+	echo -e "    $LIGHTGRAY - github.com/user/repo"
+	echo -e "    $LIGHTGRAY - git@github.com:user/repo.git"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd ls)"
+	echo -e "    List all managed repositories"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd rm) $(print_param "<repository>")"
+	echo -e "    Permanently remove the SSH keys accociated with the repository"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd dir) $(print_param "<repository>")"
+	echo -e "    Print the full path to the folder containing the repository SSH keys"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd origin) $(print_param "<repository>")"
+	echo -e "    Print the origin for pulling/cloning the repository"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd enable) $(print_param "<repository>")"
+	echo -e "    Add a new entry for the repository in $(print_path $SSH_CONFIG_PATH)"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd disable) $(print_param "<repository>")"
+	echo -e "    Remove the repository entry in $(print_path $SSH_CONFIG_PATH)"
+	echo -e ""
+	echo -e "  $script_name $(print_cmd test) $(print_param "<repository>")"
+	echo -e "    Check if the Deploy Key is set up correctly"
+	echo -e ""
+}
+
+print_deploy_key_instructions() {
+	local project_name="$1"
+	local project_username=$(get_project_username "$project_name")
+	local project_repository=$(get_project_repository "$project_name")
+	local public_key_path=$(get_project_public_key_path "$project_name")
+
+	echo -e ""
+	echo -e " ${BOLD}🔑 GitHub Deploy Key${NOFORMAT}"
+	echo -e " To finalize the setup, you need to create a new GitHub Deploy Key for your"
+	echo -e " repository, which can be done here: $(print_link "https://github.com/${project_username}/${project_repository}/settings/keys${NOFORMAT}")."
+	echo -e " Click on \"Add deploy key\" and enter the following properties: "
+	echo -e ""
+	echo -e "   ${BOLD}Title${NOFORMAT}"
+	echo -e "   ${DIM}(Doesn't really matter, it can be anything you want)${NOFORMAT}"
+	echo -e ""
+	echo -e "   ${BOLD}Key${NOFORMAT}"
+	echo -e "   ${LIGHTGRAY}$(cat "$public_key_path")${NOFORMAT}"
+	echo -e ""
+	echo -e ""
+	echo -e " When you've saved the Deploy Key, you can run the"
+	echo -e " following command to make sure everything works:"
+	echo -e ""
+	echo -e "             $DIM\$${NOFORMAT} $LIGHTGRAY$SCRIPT_NAME test $project_name $NOFORMAT"
+}
+
+add_project_to_config() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	local project_username=$(get_project_username "$project_name")
+	local project_repository=$(get_project_repository "$project_name")
+	local private_key_path=$(get_project_private_key_path "$project_name")
+
+	if [ -z "$private_key_path" ]; then
+		fatal "Could not find private key for project $project_name"
+		exit 1
+	fi
+
+	touch "$SSH_CONFIG_PATH"
+
+	if grep -q "IdentityFile=$private_key_path" $SSH_CONFIG_PATH; then
+		success "Repository is already present in $SSH_CONFIG_PATH"
+		print_deploy_key_instructions $project_name
+		exit 0
+	fi
+
+	local project_ssh_hostname=$(get_project_ssh_hostname "$project_name")
+
+	printf "\n" >> $SSH_CONFIG_PATH
+	printf "%s\n" "# GitHub deploy key" >> $SSH_CONFIG_PATH
+	printf "%s\n" "# Created: $(date)" >> $SSH_CONFIG_PATH
+	printf "%s\n" "Host ${project_ssh_hostname} github.com" >> $SSH_CONFIG_PATH
+	printf "\t%s\n" "HostName github.com" >> $SSH_CONFIG_PATH
+	printf "\t%s\n" "IdentityFile=$private_key_path" >> $SSH_CONFIG_PATH
+
+	success "Successfully added $project_name to $SSH_CONFIG_PATH"
+	print_deploy_key_instructions $project_name
+}
+
+remove_project_from_config() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	local private_key_path=$(get_project_private_key_path "$project_name")
+	local private_key_content=$(get_project_private_key "$project_name")
+
+	if [ -z "$private_key_content" ]; then
+		fatal "Could not find private key for project $project_name"
+		exit 1
+	fi
+
+	local quoted_private_key_path=$(echo "$private_key_path" | sed 's/[][()\.\/^$?*+]/\\&/g')
+  local updated=$(perl -0pe 's/((#.*\n)*.+\n([\t ]+.*\n)*[\t ]+IdentityFile='"$quoted_private_key_path"'\n([\t ]+.*\n)*)//gi' "$SSH_CONFIG_PATH")
+
+	echo "$updated" > $SSH_CONFIG_PATH
+}
+
+create_project() {
+	local url="$1"
+	local regex='(.*github.com[/:]){0,1}(.*)/(.*)(.git{0,1}|\/|$)'
+
+	# ssh -T "git@$project_name"
+	if [[ $url =~ $regex ]]; then
+		local username=$(echo "${BASH_REMATCH[2]}" | awk '{print tolower($0)}')
+		local repository=$(echo "${BASH_REMATCH[3]}" | awk '{print tolower($0)}')
+
+		if [[ -z $username || -z $repository ]]; then
+			fatal "Invalid GitHub URL!"
+			exit 1
+		fi
+
+		# Create an absolut path to our directory
+		local directory="$SSH_CI_DIR/$username/$repository"
+
+		# Make sure the directory exists
+		mkdir -p "$directory"
+
+		# Abort if the directory isn't empty
+		if [ "$(ls -A $directory)" ]; then
+			fatal "Repository already exists!"
+			exit 1
+		fi
+
+		# Path to our private key
+		local path="$directory/$SSH_KEY_FILENAME"
+
+		ssh-keygen -t ed25519 -C "github.com/$username/$repository" -f "$path" -P ""
+		eval "$(ssh-agent -s)"
+		ssh-add "$path"
+
+		success "Successfully generated SSH keys for repository $username/$repository!"
+	else
+		fatal "Invalid GitHub URL!"
+		exit 1
+	fi
+}
+
+remove_project() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	local project_path=$(get_project_path "$project_name")
+	local project_ssh_hostname=$(get_project_ssh_hostname "$project_name")
+
+	printf "Are you sure you want to remove ${CYAN}${UNDERLINE}${project_path}${NOFORMAT}? "
+	read -p "(y/N) " -r
+
+	if [[ $REPLY =~ ^[Yy]$ ]]; then
+		remove_project_from_config "$project_name"
+		ssh-keygen -R "${project_ssh_hostname}.github.com" 2>/dev/null
+
+		rm -rf "$project_path"
+	else
+		exit 1;
+	fi
+}
+
+test_project() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	# Make sure the project has an entry in SSH config
+	if ! grep -Fq "IdentityFile=${private_key_path}" $SSH_CONFIG_PATH; then
+		fatal "Could not find an entry for project $1 in $SSH_CONFIG_PATH!"
+		exit 1
+	fi
+
+	local project_ssh_hostname=$(get_project_ssh_hostname "$project_name")
+
+	# Try to connect to the remote using SSH
+	local ssh_exit_code=$(ssh -n "git@$project_ssh_hostname" >/dev/null 2>&1; echo $?)
+
+	if [ $ssh_exit_code -eq 255 ]; then
+		fatal "Unable to connect to remote:${NOFORMAT} git@${project_name}"
+		fatal "Have you added the public key to the GitHub repository?"
+		exit 1
+	fi
+
+	success "Success!"
+}
+
+print_project_path() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	local project_path=$(get_project_path "$project_name")
+
+	echo "$project_path"
+}
+
+print_project_origin() {
+	local project_name="$1"
+
+	# Make sure the project exists
+	if ! does_project_exist $project_name; then
+		fatal "Project $project_name does not exist"
+		exit 1
+	fi
+
+	local project_path=$(get_project_path "$project_name")
+	local project_ssh_hostname=$(get_project_ssh_hostname "$project_name")
+	local username=$(get_project_username "$project_name")
+	local repository=$(get_project_repository "$project_name")
+
+	echo "git@${project_ssh_hostname}:${username}/${repository}.git"
+}
+
+parse_input() {
+	if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+		print_usage
+		exit 0
+	fi
+
+	if [ "$1" = "ls" ]; then
+		list_projects
+		exit 0
+	fi
+
+	if [[ ! -z $1 ]] && [[ -z $2 ]]; then
+		fatal "No repository specified!"
+		exit 1
+	fi
+
+	if [ "$1" = "init" ]; then
+		create_project "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "rm" ]; then
+		remove_project "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "dir" ]; then
+		print_project_path "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "origin" ]; then
+		print_project_origin "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "enable" ]; then
+		add_project_to_config "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "disable" ]; then
+		remove_project_from_config "$2"
+		exit 0
+	fi
+
+	if [ "$1" = "test" ]; then
+		test_project "$2"
+		exit 0
+	fi
+
+	print_usage
+}
+
+setup_colors
+parse_input $@
