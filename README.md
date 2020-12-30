@@ -3,10 +3,8 @@
 > A lightweight, zero dependency utility for managing SSH keys for multiple GitHub repositories on a single machine. It's essentially a simplified version of the workflow described here: https://docs.github.com/developers/overview/managing-deploy-keys.
 
 <p align="center">
-  <img src="https://gist.githubusercontent.com/Kattjakt/bd6708721f28dd54433e8c4357d3706d/raw/971ce1bc792351f818bb12a609618ca815e47d51/github-ssh-manager-warning.svg">
+  <img src="https://gist.githubusercontent.com/Kattjakt/c3e10b523e124f40ff9d196ce23c8af4/raw/c2eda331d36cc4df9aff714da2194c66a68e4adf/test.svg" width="100%">
 </p>
-
-***
 
 <p align="center">
   <img src="https://i.imgur.com/2lnzTEb.png">
