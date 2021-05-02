@@ -2,7 +2,7 @@
 # Description: Lightweight utility for managing SSH keys for multiple GitHub repositories
 # Author: Leo Sandström <leo@sandstrom.party>
 
-SSH_ROOT_DIR="~/.ssh"
+SSH_ROOT_DIR="$HOME/.ssh"
 SSH_CI_DIR="$SSH_ROOT_DIR/github"
 SSH_KEY_FILENAME="id_ed25519"
 SSH_CONFIG_PATH="$SSH_ROOT_DIR/config"
