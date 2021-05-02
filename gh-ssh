@@ -11,6 +11,8 @@ SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
 set -Eeo pipefail
 trap cleanup SIGINT SIGTERM ERR EXIT
 
+IFS_OLD=$IFS
+
 cleanup() {
   trap - SIGINT SIGTERM ERR EXIT
 }
@@ -77,6 +79,7 @@ get_project_username() {
 	IFS='/'
 	read -a list <<< "$project_name"
 	local count="${#list[*]}"
+	IFS=$IFS_OLD
 
 	# If the input matches our format
 	if [ $count -eq 2 ]; then
@@ -93,6 +96,7 @@ get_project_repository() {
 	IFS='/'
 	read -a list <<< "$project_name"
 	local count="${#list[*]}"
+	IFS=$IFS_OLD
 
 	# If the input matches our format
 	if [ $count -eq 2 ]; then
@@ -131,6 +135,8 @@ get_project_private_key_path() {
 
 	echo $private_key_path
 }
+
+
 
 get_project_public_key() {
 	local project_name="$1"
@@ -189,8 +195,8 @@ list_projects() {
 		# Skip if we couldn't find a public key
 		if [ -z "$public_key_path" ]; then continue; fi
 
-		local SSH_public_key_filename=$(basename "$public_key_path")
-		local private_key_filename=$(basename "$public_key_filename" .pub)
+		local public_key_filename=$(basename "$public_key_path")
+		local private_key_filename=$(basename "$private_key_path")
 
 		# skip if we couldn't find a private key
 		if [ -z "$private_key_filename" ]; then continue; fi
